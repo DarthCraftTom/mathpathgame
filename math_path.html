@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Math Path Game</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-color: #050b14;
+            user-select: none;
+            font-family: sans-serif;
+            overflow: hidden;
+        }
+        .game-container {
+            position: relative;
+            width: 960px;
+            height: 640px;
+            border-radius: 1rem;
+            overflow: hidden;
+            border: 1px solid #1e293b;
+            box-shadow: 0 0 80px rgba(6, 182, 212, 0.15);
+        }
+        .scanlines {
+            position: absolute;
+            inset: 0;
+            z-index: 10;
+            pointer-events: none;
+            background: repeating-linear-gradient(0deg, rgba(0,0,0,0.15), rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px);
+        }
+        .vignette {
+            position: absolute;
+            inset: 0;
+            z-index: 10;
+            pointer-events: none;
+            background: radial-gradient(circle, transparent 50%, black 150%);
+        }
+        canvas {
+            display: block;
+            background-color: #0f172a;
+            touch-action: none;
+        }
+        #gameInput {
+            position: absolute;
+            z-index: 20;
+            background-color: rgba(6, 182, 212, 0.05);
+            border: 2px solid #334155;
+            border-radius: 0.25rem;
+            color: #06b6d4;
+            font-family: 'Roboto Mono', monospace;
+            font-size: 1.5rem;
+            padding: 0 0.5rem;
+            outline: none;
+            transition: all 0.3s;
+            top: 280px;
+            left: 650px;
+            width: 250px;
+            height: 60px;
+            box-sizing: border-box;
+        }
+        #gameInput:focus {
+            border-color: #06b6d4;
+            box-shadow: 0 0 15px rgba(6, 182, 212, 0.2);
+            background-color: rgba(6, 182, 212, 0.1);
+        }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <div class="scanlines"></div>
+        <div class="vignette"></div>
+        <canvas id="gameCanvas" width="960" height="640"></canvas>
+        <input id="gameInput" type="text" autocomplete="off" spellcheck="false" placeholder="zde piš...">
+    </div>
+    <script>
+        // --- KONSTANTY ---
+        const GRID_SIZE = 480;
+        const OFF_X = 50;
+        const OFF_Y = 80;
+        const CENTER_X = OFF_X + GRID_SIZE / 2;
+        const CENTER_Y = OFF_Y + GRID_SIZE / 2;
+        const SCALE = GRID_SIZE / 20;
+
+        const C = {
+            bg: '#0f172a', grid: '#1e293b', axis: '#475569', p1: '#06b6d4',
+            p2: '#d946ef', gold: '#fbbf24', success: '#22c55e', danger: '#ef4444',
+            text: '#f8fafc', rare: '#3b82f6', legendary: '#f59e0b',
+        };
+
+        const LOOT_TABLE = [
+            { name: 'Binární Kávovar', rarity: 'Běžné', color: '#94a3b8' },
+            { name: 'Neonový Stylus', rarity: 'Běžné', color: '#94a3b8' },
+            { name: 'Kalkulačka Osudu', rarity: 'Vzácné', color: C.rare },
+            { name: 'Derivační Štít', rarity: 'Vzácné', color: C.rare },
+            { name: 'Faktoriál Moci', rarity: 'Epické', color: C.p2 },
+            { name: 'Zlatý Řez', rarity: 'Legendární', color: C.legendary },
+            { name: 'Nekonečno', rarity: 'Legendární', color: C.legendary },
+        ];
+
+        const INITIAL_BUTTONS = [
+            { id: 'check', text: 'SPUSTIT', x: 650, y: 400, w: 250, h: 60, bg: C.success, hover: false },
+            { id: 'hint', text: '?', x: 650, y: 480, w: 60, h: 50, bg: C.p1, hover: false },
+            { id: 'next', text: 'DALŠÍ LEVEL >>', x: 720, y: 480, w: 180, h: 50, bg: C.p2, disabled: true, hover: false },
+            { id: 'btn_pow', text: 'xⁿ', x: 650, y: 350, w: 120, h: 40, bg: '#334155', hover: false, math: true },
+            { id: 'btn_root', text: '√', x: 780, y: 350, w: 120, h: 40, bg: '#334155', hover: false, math: true },
+        ];
+
+        // --- POMOCNÉ FUNKCE ---
+        const toCX = (x) => CENTER_X + x * SCALE;
+        const toCY = (y) => CENTER_Y - y * SCALE;
+        const toMX = (px) => (px - CENTER_X) / SCALE;
+        const toMathY = (py) => (CENTER_Y - py) / SCALE;
+        const rInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+        const parseFunc = (str) => {
+            try {
+                if (!str) return null;
+                let s = str.toLowerCase().replace(/\s+/g, '');
+                s = s.replace(/(\d)([a-z(])/g, '$1*$2');
+                s = s.replace(/(\))([a-z0-9])/g, '$1*$2');
+                s = s.replace(/\^/g, '**');
+                ['sin', 'cos', 'tan', 'sqrt', 'abs', 'log'].forEach((m) => {
+                    s = s.replace(new RegExp(`\\b${m}\\b`, 'g'), `Math.${m}`);
+                });
+                const fn = new Function('x', `return ${s};`);
+                fn(0); // Test execution
+                return fn;
+            } catch {
+                return null;
+            }
+        };
+
+        // --- GLOBÁLNÍ STAV ---
+        let audioCtx = null;
+        let canvas, ctx, input;
+        let reqId = 0;
+
+        let state = {
+            level: 1, score: 0, displayScore: 0, streak: 0, status: 'playing',
+            msg: 'SPOJ BODY FUNKCÍ', subMsg: '', player: { x: -5, y: 0 }, enemy: { x: 5, y: 0 },
+            obstacles: [], targetFuncStr: '', targetFuncType: '', hintStage: 0,
+            particles: [], shake: 0, flash: 0, time: 0, drawProgress: 0,
+            chestHealth: 5, chestLoot: null, inventory: [],
+        };
+
+        let buttons = JSON.parse(JSON.stringify(INITIAL_BUTTONS));
+
+        // --- AUDIO SYSTÉM ---
+        const initAudio = () => {
+            if (!audioCtx) {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                audioCtx = new AudioContextClass();
+            }
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        };
+
+        const playSound = (type) => {
+            if (!audioCtx) return;
+            const t = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            if (type === 'type') {
+                osc.frequency.setValueAtTime(800, t);
+                osc.frequency.exponentialRampToValueAtTime(1200, t + 0.05);
+                gain.gain.setValueAtTime(0.03, t);
+                gain.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+                osc.start(); osc.stop(t + 0.05);
+            } else if (type === 'win') {
+                [440, 554, 659].forEach((freq, i) => {
+                    const o = audioCtx.createOscillator();
+                    const g = audioCtx.createGain();
+                    o.connect(g); g.connect(audioCtx.destination);
+                    o.type = 'triangle';
+                    o.frequency.value = freq;
+                    g.gain.setValueAtTime(0.05, t + i * 0.05);
+                    g.gain.exponentialRampToValueAtTime(0.001, t + 0.8);
+                    o.start(t + i * 0.05); o.stop(t + 0.8);
+                });
+            } else if (type === 'chest_hit') {
+                osc.type = 'square';
+                osc.frequency.setValueAtTime(150, t);
+                osc.frequency.linearRampToValueAtTime(100, t + 0.1);
+                gain.gain.setValueAtTime(0.1, t);
+                gain.gain.linearRampToValueAtTime(0, t + 0.1);
+                osc.start(); osc.stop(t + 0.1);
+            } else if (type === 'legendary') {
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(200, t);
+                osc.frequency.linearRampToValueAtTime(800, t + 0.5);
+                gain.gain.setValueAtTime(0.1, t);
+                gain.gain.linearRampToValueAtTime(0, t + 1.0);
+                osc.start(); osc.stop(t + 1.0);
+            } else if (type === 'error') {
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(100, t);
+                osc.frequency.linearRampToValueAtTime(50, t + 0.3);
+                gain.gain.setValueAtTime(0.1, t);
+                gain.gain.linearRampToValueAtTime(0, t + 0.3);
+                osc.start(); osc.stop(t + 0.3);
+            } else if (type === 'click') {
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(600, t);
+                gain.gain.setValueAtTime(0.05, t);
+                gain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+                osc.start(); osc.stop(t + 0.1);
+            }
+        };
+
+        // --- HERNÍ LOGIKA ---
+        const createParticles = (mx, my, count, color) => {
+            const cx = state.status === 'chest' ? canvas.width / 2 : toCX(mx);
+            const cy = state.status === 'chest' ? canvas.height / 2 : toCY(my);
+            for (let i = 0; i < count; i++) {
+                const ang = Math.random() * Math.PI * 2;
+                const spd = Math.random() * 10 + 2;
+                state.particles.push({
+                    x: cx, y: cy, vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
+                    life: 1.0, color: color || C.p1, size: Math.random() * 5 + 2, grav: Math.random() * 0.2,
+                });
+            }
+        };
+
+        const initLevel = () => {
+            if (input) input.value = '';
+            state.status = 'playing';
+            state.msg = `LEVEL ${state.level}`;
+            state.subMsg = 'Čekání na vstup...';
+            state.hintStage = 0;
+            state.drawProgress = 0;
+            state.particles = [];
+            state.obstacles = [];
+            state.chestHealth = 5;
+            state.chestLoot = null;
+
+            if (input) input.disabled = false;
+            
+            const nextBtn = buttons.find(b => b.id === 'next');
+            const checkBtn = buttons.find(b => b.id === 'check');
+            if (nextBtn) nextBtn.disabled = true;
+            if (checkBtn) checkBtn.disabled = false;
+
+            const types = ['lin', 'quad', 'sin'];
+            const type = types[Math.floor(Math.random() * types.length)];
+            let a, b, fStr, desc;
+
+            if (type === 'lin') {
+                a = rInt(-3, 3) || 1; b = rInt(-4, 4);
+                fStr = `${a}x ${b >= 0 ? '+' : ''}${b}`; desc = 'Lineární [ax+b]';
+            } else if (type === 'quad') {
+                a = Math.random() > 0.5 ? 0.5 : -0.5; b = rInt(-3, 3);
+                fStr = `${a}*x^2 ${b >= 0 ? '+' : ''}${b}`; desc = 'Parabola [ax^2+b]';
+            } else {
+                a = rInt(2, 4); b = 0.5;
+                fStr = `${a}*sin(${b}x)`; desc = 'Vlna [a*sin(bx)]';
+            }
+
+            state.targetFuncStr = fStr.replace(/\*\*/g, '^').replace(/\*/g, '').replace('Math.', '');
+            state.targetFuncType = desc;
+            const sol = parseFunc(fStr);
+
+            if (!sol) { initLevel(); return; }
+
+            let pts = [];
+            for (let x = -8; x <= 8; x++) {
+                let y = sol(x);
+                if (Math.abs(y) <= 8) pts.push({ x, y });
+            }
+
+            if (pts.length < 2) { initLevel(); return; }
+
+            state.player = pts[Math.floor(Math.random() * pts.length)];
+            state.enemy = state.player;
+            while (state.enemy === state.player) state.enemy = pts[Math.floor(Math.random() * pts.length)];
+            if (state.player.x > state.enemy.x) {
+                const temp = state.player; state.player = state.enemy; state.enemy = temp;
+            }
+
+            let count = rInt(3 + Math.floor(state.level / 3), 6);
+            let safe = 0;
+            while (state.obstacles.length < count && safe++ < 100) {
+                let ox = rInt(-9, 8), oy = rInt(-9, 8);
+                let hit = false;
+                for (let tx = ox; tx <= ox + 1.2; tx += 0.2) {
+                    let ty = sol(tx);
+                    if (ty >= oy - 0.5 && ty <= oy + 1.5) hit = true;
+                }
+                if (Math.hypot(state.player.x - ox, state.player.y - oy) < 2) hit = true;
+                if (Math.hypot(state.enemy.x - ox, state.enemy.y - oy) < 2) hit = true;
+                
+                if (!hit) state.obstacles.push({ x: ox, y: oy });
+            }
+        };
+
+        const hitChest = () => {
+            if (state.status !== 'chest' || state.chestHealth <= 0) return;
+            state.chestHealth--;
+            state.shake = 5;
+            playSound('chest_hit');
+            createParticles(toMX(CENTER_X + 150), toMathY(CENTER_Y), 10, C.gold);
+
+            if (state.chestHealth <= 0) {
+                const loot = LOOT_TABLE[Math.floor(Math.random() * LOOT_TABLE.length)];
+                state.chestLoot = loot;
+                state.inventory.push(loot);
+                playSound('legendary');
+                createParticles(0, 0, 200, loot.color);
+                state.flash = 0.5;
+            }
+        };
+
+        const winLevel = () => {
+            state.status = 'won';
+            state.flash = 1.0;
+            if (input) input.disabled = true;
+            playSound('win');
+            state.streak++;
+            let base = 100;
+            let bonus = state.streak * 20;
+            state.score += base + bonus;
+            state.msg = 'LEVEL DOKONČEN';
+            state.subMsg = `+${base} BODŮ | STREAK BONUS +${bonus}`;
+            
+            createParticles(state.enemy.x, state.enemy.y, 100, C.p2);
+            
+            const nextBtn = buttons.find(b => b.id === 'next');
+            const checkBtn = buttons.find(b => b.id === 'check');
+            if (nextBtn) nextBtn.disabled = false;
+            if (checkBtn) checkBtn.disabled = true;
+
+            if (state.level % 5 === 0) {
+                setTimeout(() => {
+                    state.status = 'chest';
+                    state.msg = 'KVANTOVÁ TRUHLA NALEZENA!';
+                    state.subMsg = 'Klikej na truhlu pro otevření!';
+                }, 1500);
+            }
+        };
+
+        const checkSolution = () => {
+            if (state.status !== 'playing') return;
+            const val = input ? input.value : '';
+            const func = parseFunc(val);
+            
+            if (!func) {
+                state.msg = 'CHYBA SYNTAXE';
+                state.shake = 10;
+                state.streak = 0;
+                playSound('error');
+                return;
+            }
+
+            state.drawProgress = 0;
+            const pY = func(state.player.x);
+            const eY = func(state.enemy.x);
+
+            if (Math.abs(pY - state.player.y) > 0.5 || Math.abs(eY - state.enemy.y) > 0.5) {
+                state.msg = 'NETREFIL JSI BODY';
+                state.streak = 0;
+                playSound('error');
+                return;
+            }
+
+            let hit = false;
+            for (let x = state.player.x; x <= state.enemy.x; x += 0.1) {
+                let y = func(x);
+                for (let o of state.obstacles) {
+                    if (x >= o.x && x <= o.x + 1.2 && y >= o.y && y <= o.y + 1.2) hit = true;
+                }
+            }
+
+            if (hit) {
+                state.msg = 'KOLIZE SE ZDÍ!';
+                state.shake = 20;
+                state.streak = 0;
+                playSound('error');
+            } else {
+                winLevel();
+            }
+        };
+
+        const insertMath = (type) => {
+            if (!input) return;
+            const start = input.selectionStart || 0;
+            const end = input.selectionEnd || 0;
+            const text = input.value;
+            let insertText = '';
+            let cursorOffset = 0;
+
+            if (type === 'pow') { insertText = '^()'; cursorOffset = 2; }
+            else if (type === 'root') { insertText = 'sqrt()'; cursorOffset = 5; }
+
+            input.value = text.substring(0, start) + insertText + text.substring(end);
+            input.focus();
+            input.setSelectionRange(start + cursorOffset, start + cursorOffset);
+            playSound('click');
+        };
+
+        const nextLevel = () => {
+            state.level++;
+            initLevel();
+        };
+
+        // --- VYKRESLOVÁNÍ ---
+        const draw = () => {
+            if (!ctx) return;
+            let dx = 0, dy = 0;
+            if (state.shake > 0) {
+                dx = (Math.random() - 0.5) * state.shake;
+                dy = (Math.random() - 0.5) * state.shake;
+                state.shake *= 0.9;
+                if (state.shake < 0.5) state.shake = 0;
+            }
+
+            ctx.save();
+            ctx.translate(dx, dy);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(OFF_X, OFF_Y, GRID_SIZE, GRID_SIZE);
+
+            ctx.strokeStyle = C.grid;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (let i = OFF_X; i <= OFF_X + GRID_SIZE; i += SCALE) {
+                ctx.moveTo(i, OFF_Y); ctx.lineTo(i, OFF_Y + GRID_SIZE);
+            }
+            for (let i = OFF_Y; i <= OFF_Y + GRID_SIZE; i += SCALE) {
+                ctx.moveTo(OFF_X, i); ctx.lineTo(OFF_X + GRID_SIZE, i);
+            }
+            ctx.stroke();
+
+            ctx.strokeStyle = C.axis;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(CENTER_X, OFF_Y); ctx.lineTo(CENTER_X, OFF_Y + GRID_SIZE);
+            ctx.moveTo(OFF_X, CENTER_Y); ctx.lineTo(OFF_X + GRID_SIZE, CENTER_Y);
+            ctx.stroke();
+
+            ctx.fillStyle = '#64748b';
+            ctx.font = '10px Roboto Mono';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            for (let i = -10; i <= 10; i++) {
+                if (i === 0) continue; 
+                const x = toCX(i);
+                if (x >= OFF_X && x <= OFF_X + GRID_SIZE) {
+                    ctx.fillText(i.toString(), x, CENTER_Y + 15);
+                    ctx.beginPath(); ctx.moveTo(x, CENTER_Y - 3); ctx.lineTo(x, CENTER_Y + 3); ctx.stroke();
+                }
+            }
+            for (let i = -10; i <= 10; i++) {
+                if (i === 0) continue;
+                const y = toCY(i);
+                if (y >= OFF_Y && y <= OFF_Y + GRID_SIZE) {
+                    ctx.fillText(i.toString(), CENTER_X - 15, y);
+                    ctx.beginPath(); ctx.moveTo(CENTER_X - 3, y); ctx.lineTo(CENTER_X + 3, y); ctx.stroke();
+                }
+            }
+
+            if (state.status !== 'chest') {
+                ctx.fillStyle = 'rgba(239, 68, 68, 0.15)';
+                ctx.strokeStyle = C.danger;
+                ctx.shadowColor = C.danger;
+                state.obstacles.forEach(o => {
+                    let x = toCX(o.x), y = toCY(o.y + 1.2);
+                    ctx.shadowBlur = 10;
+                    ctx.fillRect(x, y, 1.2 * SCALE, 1.2 * SCALE);
+                    ctx.strokeRect(x, y, 1.2 * SCALE, 1.2 * SCALE);
+                    ctx.shadowBlur = 0;
+                    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + 1.2 * SCALE, y + 1.2 * SCALE); ctx.stroke();
+                });
+
+                const val = input ? input.value : '';
+                const func = parseFunc(val);
+                if (func && val.length > 0) {
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.rect(OFF_X, OFF_Y, GRID_SIZE, GRID_SIZE);
+                    ctx.clip();
+                    
+                    ctx.beginPath();
+                    ctx.strokeStyle = C.p1;
+                    ctx.lineWidth = 4;
+                    ctx.shadowBlur = 15;
+                    ctx.shadowColor = C.p1;
+                    
+                    let maxX = OFF_X + (GRID_SIZE * state.drawProgress);
+                    if (state.status === 'playing') state.drawProgress = Math.min(state.drawProgress + 0.04, 1);
+                    else state.drawProgress = 1;
+
+                    let drawing = false;
+                    for (let px = OFF_X; px <= maxX; px += 2) {
+                        let my = func(toMX(px));
+                        let py = toCY(my);
+                        if (Math.abs(my) > 12) { drawing = false; continue; }
+                        if (!drawing) { ctx.moveTo(px, py); drawing = true; }
+                        else ctx.lineTo(px, py);
+                    }
+                    ctx.stroke();
+                    ctx.restore();
+                }
+
+                const pulse = Math.sin(state.time * 0.1) * 4;
+                [state.player, state.enemy].forEach((p, i) => {
+                    const cx = toCX(p.x), cy = toCY(p.y);
+                    const col = i === 0 ? C.success : C.p2;
+                    ctx.fillStyle = col;
+                    ctx.shadowColor = col;
+                    ctx.shadowBlur = 20;
+                    ctx.beginPath(); ctx.arc(cx, cy, 6 + pulse, 0, Math.PI * 2); ctx.fill();
+                    ctx.shadowBlur = 0;
+                    ctx.fillStyle = '#fff';
+                    ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI * 2); ctx.fill();
+                    ctx.fillStyle = col;
+                    ctx.font = 'bold 12px Orbitron';
+                    ctx.fillText(i === 0 ? 'START' : 'CÍL', cx - 15, cy - 20);
+                });
+
+            } else {
+                const cx = canvas.width / 2;
+                const cy = canvas.height / 2;
+
+                if (state.chestLoot) {
+                    ctx.textAlign = 'center';
+                    ctx.fillStyle = state.chestLoot.color;
+                    ctx.font = 'bold 30px Orbitron';
+                    ctx.shadowColor = state.chestLoot.color;
+                    ctx.shadowBlur = 20;
+                    ctx.fillText(state.chestLoot.name, cx, cy - 50);
+                    ctx.font = '20px Roboto Mono';
+                    ctx.fillStyle = '#fff';
+                    ctx.shadowBlur = 0;
+                    ctx.fillText(state.chestLoot.rarity, cx, cy);
+                    ctx.font = '14px Orbitron';
+                    ctx.fillStyle = '#94a3b8';
+                    ctx.fillText('Předmět uložen do inventáře', cx, cy + 40);
+                } else {
+                    const size = 100 + Math.sin(state.time * 0.2) * 5;
+                    ctx.fillStyle = C.gold;
+                    ctx.shadowColor = C.gold;
+                    ctx.shadowBlur = 30;
+                    ctx.fillRect(cx - size / 2, cy - size / 2, size, size * 0.8);
+                    ctx.fillStyle = '#fff';
+                    ctx.fillRect(cx - size / 2, cy - size / 10, size, 10);
+                    ctx.fillStyle = C.gold;
+                    ctx.font = 'bold 20px Orbitron';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(`KLIKNI! (${state.chestHealth})`, cx, cy + size);
+                }
+            }
+
+            const px = 650;
+            ctx.textAlign = 'left';
+            ctx.fillStyle = C.p1;
+            ctx.font = '900 32px Orbitron';
+            ctx.shadowBlur = 15; ctx.shadowColor = C.p1;
+            ctx.fillText('MATH PATH', px, 60);
+            ctx.shadowBlur = 0;
+
+            state.displayScore += (state.score - state.displayScore) * 0.1;
+            ctx.font = '20px Roboto Mono';
+            ctx.fillStyle = C.gold;
+            ctx.fillText(`SKÓRE: ${Math.floor(state.displayScore)}`, px, 100);
+            ctx.fillStyle = state.streak > 2 ? C.p2 : '#94a3b8';
+            ctx.fillText(`STREAK: ${state.streak}x`, px, 130);
+
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = '12px Orbitron';
+            ctx.fillText(`INVENTÁŘ (${state.inventory.length})`, px, 580);
+            state.inventory.slice(-5).forEach((item, i) => {
+                ctx.fillStyle = item.color;
+                ctx.fillRect(px + i * 25, 600, 20, 20);
+            });
+
+            if (state.status !== 'chest') {
+                ctx.fillStyle = C.text;
+                ctx.font = '14px Orbitron';
+                ctx.fillText('VLOŽ FUNKCI:', px, 270);
+                
+                buttons.forEach(btn => {
+                    ctx.globalAlpha = btn.disabled ? 0.3 : 1;
+                    if (btn.math) {
+                        ctx.fillStyle = btn.hover ? '#475569' : btn.bg;
+                    } else {
+                        ctx.fillStyle = btn.hover ? '#3b82f6' : btn.bg;
+                    }
+                    ctx.shadowBlur = btn.hover ? 20 : 0;
+                    ctx.shadowColor = btn.bg;
+
+                    ctx.beginPath();
+                    if (btn.math) {
+                        ctx.roundRect(btn.x, btn.y, btn.w, btn.h, 4);
+                    } else {
+                        ctx.moveTo(btn.x, btn.y);
+                        ctx.lineTo(btn.x + btn.w - 15, btn.y);
+                        ctx.lineTo(btn.x + btn.w, btn.y + 15);
+                        ctx.lineTo(btn.x + btn.w, btn.y + btn.h);
+                        ctx.lineTo(btn.x + 15, btn.y + btn.h);
+                        ctx.lineTo(btn.x, btn.y + btn.h - 15);
+                    }
+                    ctx.fill();
+
+                    ctx.fillStyle = (!btn.math) ? '#0f172a' : '#fff';
+                    ctx.font = btn.math ? '20px Roboto Mono' : 'bold 16px Orbitron';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(btn.text, btn.x + btn.w / 2, btn.y + btn.h / 2 + 3);
+                });
+                ctx.globalAlpha = 1;
+
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'alphabetic';
+                ctx.font = 'bold 20px Orbitron';
+                ctx.fillStyle = state.status === 'won' ? C.success : (state.status === 'error' ? C.danger : C.text);
+                ctx.shadowBlur = 10; ctx.shadowColor = ctx.fillStyle;
+                ctx.fillText(state.msg, 775, 200);
+                
+                ctx.font = '14px Roboto Mono';
+                ctx.fillStyle = '#94a3b8';
+                ctx.shadowBlur = 0;
+                ctx.fillText(state.subMsg, 775, 230);
+            }
+
+            state.particles.forEach(p => {
+                ctx.globalAlpha = p.life;
+                ctx.fillStyle = p.color;
+                ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+            });
+            ctx.globalAlpha = 1;
+
+            if (state.flash > 0) {
+                ctx.fillStyle = `rgba(255,255,255,${state.flash})`;
+                ctx.fillRect(-10, -10, canvas.width + 20, canvas.height + 20);
+                state.flash *= 0.9;
+            }
+
+            ctx.restore();
+        };
+
+        const updateGame = () => {
+            state.time++;
+            state.particles.forEach(p => {
+                p.x += p.vx; p.y += p.vy;
+                p.vy += p.grav;
+                p.life -= 0.02;
+            });
+            state.particles = state.particles.filter(p => p.life > 0);
+            draw();
+            reqId = requestAnimationFrame(updateGame);
+        };
+
+        // --- HANDLERY PRO DOM EVENTY ---
+        const handleMouseMove = (e) => {
+            const r = canvas.getBoundingClientRect();
+            const mx = e.clientX - r.left;
+            const my = e.clientY - r.top;
+
+            if (state.status === 'chest') {
+                canvas.style.cursor = 'pointer';
+                return;
+            }
+
+            canvas.style.cursor = 'default';
+            let anyHover = false;
+            buttons.forEach(b => {
+                b.hover = (!b.disabled && mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h);
+                if (b.hover) anyHover = true;
+            });
+
+            if (anyHover) canvas.style.cursor = 'pointer';
+        };
+
+        const handleMouseDown = (e) => {
+            initAudio();
+            const r = canvas.getBoundingClientRect();
+            const mx = e.clientX - r.left;
+            const my = e.clientY - r.top;
+
+            if (state.status === 'chest') {
+                if (!state.chestLoot) hitChest();
+                else state.status = 'won';
+                return;
+            }
+
+            buttons.forEach(b => {
+                if (b.hover) {
+                    e.preventDefault();
+                    if (b.id === 'check') checkSolution();
+                    if (b.id === 'next') nextLevel();
+                    if (b.id === 'hint') {
+                        if (state.hintStage === 0) {
+                            state.msg = 'TIP';
+                            state.subMsg = state.targetFuncType;
+                            state.hintStage++;
+                        } else {
+                            if (input) input.value = state.targetFuncStr;
+                        }
+                    }
+                    if (b.id === 'btn_pow') insertMath('pow');
+                    if (b.id === 'btn_root') insertMath('root');
+                }
+            });
+
+            if (input) input.focus();
+        };
+
+        const handleInputKeyDown = (e) => {
+            initAudio();
+            if (e.key === 'Enter') {
+                if (input) {
+                    const pos = input.selectionStart || 0;
+                    if (input.value[pos] === ')') {
+                        e.preventDefault();
+                        input.setSelectionRange(pos + 1, pos + 1);
+                    } else {
+                        checkSolution();
+                    }
+                }
+            }
+        };
+
+        // --- INICIALIZACE PO NAČTENÍ STRÁNKY ---
+        window.addEventListener('DOMContentLoaded', () => {
+            canvas = document.getElementById('gameCanvas');
+            ctx = canvas.getContext('2d');
+            input = document.getElementById('gameInput');
+
+            canvas.addEventListener('mousemove', handleMouseMove);
+            canvas.addEventListener('mousedown', handleMouseDown);
+            input.addEventListener('keydown', handleInputKeyDown);
+            input.addEventListener('input', () => playSound('type'));
+
+            initLevel();
+            reqId = requestAnimationFrame(updateGame);
+        });
+    </script>
+</body>
+</html>
